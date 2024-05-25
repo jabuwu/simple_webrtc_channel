@@ -1,3 +1,5 @@
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Signal {
     Offer(String),
     Answer(String),
@@ -375,7 +377,6 @@ impl Signaler {
                     ));
                     closures.push(onconnectionstatechange);
                 }
-                // TODO: on_peer_connection_state_change
                 let open_data_channel = Arc::new(RwLock::new(None));
                 if offer {
                     let mut data_channel_init = RtcDataChannelInit::new();
