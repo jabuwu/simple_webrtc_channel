@@ -1,0 +1,30 @@
+[package]
+name = "simple_webrtc_channel"
+version = "0.1.0"
+edition = "2021"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.37.0", default-features = false, features = ["rt", "rt-multi-thread", "sync"] }
+webrtc = { version = "0.11.0", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3.66"
+wasm-bindgen = "0.2.89"
+wasm-bindgen-futures = "0.4.39"
+web-sys = { version = "0.3.66", features = [
+    "RtcConfiguration",
+    "RtcDataChannel",
+    "RtcDataChannelInit",
+    "RtcDataChannelState",
+    "RtcDataChannelType",
+    "RtcIceCandidate",
+    "RtcIceCandidateInit",
+    "RtcIceTransportPolicy",
+    "RtcPeerConnection",
+    "RtcPeerConnectionState",
+    "RtcSdpType",
+    "RtcSessionDescription",
+    "RtcSessionDescriptionInit",
+    "RtcStatsReport",
+    "TextEncoder"
+] }
