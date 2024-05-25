@@ -1,4 +1,18 @@
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SignalerKind {
+    Offer {
+        data_channel_configuration: DataChannelConfiguration,
+    },
+    Answer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DataChannelConfiguration {
+    Reliable,
+    Unreliable { ordered: bool, max_retransmits: u16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Signal {
     Offer(String),
@@ -29,7 +43,7 @@ pub struct Signaler {
 
 impl Signaler {
     // TODO: config
-    pub fn new(offer: bool) -> Self {
+    pub fn new(signaler_kind: SignalerKind) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use std::{sync::Arc, thread::spawn};
@@ -114,101 +128,116 @@ impl Signaler {
                         }));
                     }
                     let open_data_channel = Arc::new(RwLock::new(None));
-                    if offer {
-                        let Ok(data_channel) = peer
-                            .create_data_channel(
-                                "data",
-                                Some(RTCDataChannelInit {
-                                    ordered: Some(false),
-                                    max_retransmits: Some(0),
-                                    ..Default::default()
-                                }),
-                            )
-                            .await
-                        else {
-                            error
-                                .write()
+                    match signaler_kind {
+                        SignalerKind::Offer {
+                            data_channel_configuration,
+                        } => {
+                            let Ok(data_channel) = peer
+                                .create_data_channel(
+                                    "data",
+                                    Some(match data_channel_configuration {
+                                        DataChannelConfiguration::Reliable => RTCDataChannelInit {
+                                            ordered: Some(false),
+                                            max_retransmits: Some(0),
+                                            ..Default::default()
+                                        },
+                                        DataChannelConfiguration::Unreliable {
+                                            ordered,
+                                            max_retransmits,
+                                        } => RTCDataChannelInit {
+                                            ordered: Some(ordered),
+                                            max_retransmits: Some(max_retransmits),
+                                            ..Default::default()
+                                        },
+                                    }),
+                                )
                                 .await
-                                .get_or_insert(Error::FailedToCreateDataChannel);
-                            return;
-                        };
-                        let channel = data_channel.clone();
-                        let open_data_channel = open_data_channel.clone();
-                        let error_clone = error.clone();
-                        data_channel.on_open(Box::new(move || {
-                            let error = error_clone.clone();
-                            Box::pin(async move {
-                                let (obj_to_rtc_sender, obj_to_rtc_receiver) =
-                                    mpsc::channel::<Vec<u8>>(100);
-                                let (rtc_to_obj_sender, rtc_to_obj_receiver) =
-                                    mpsc::channel::<Vec<u8>>(100);
-                                _ = channel_sender
-                                    .send(DataChannel {
-                                        error,
-                                        message_sender: obj_to_rtc_sender,
-                                        message_receiver: rtc_to_obj_receiver,
-                                    })
-                                    .await;
-                                *open_data_channel.write().await =
-                                    Some((channel.clone(), obj_to_rtc_receiver));
-                                let message_sender = rtc_to_obj_sender;
-                                channel.on_message(Box::new(move |message| {
-                                    let message_sender = message_sender.clone();
-                                    Box::pin(async move {
-                                        _ = message_sender
-                                            .send(message.data.into_iter().collect::<Vec<_>>())
-                                            .await;
-                                    })
-                                }));
-                            })
-                        }));
-                        let Ok(offer) = peer.create_offer(None).await else {
-                            error
-                                .write()
-                                .await
-                                .get_or_insert(Error::FailedToCreateOffer);
-                            return;
-                        };
-                        if peer.set_local_description(offer.clone()).await.is_err() {
-                            error
-                                .write()
-                                .await
-                                .get_or_insert(Error::FailedToSetLocalDescription);
-                            return;
-                        }
-                        _ = signal_sender.send(Signal::Offer(offer.sdp)).await;
-                    } else {
-                        let open_data_channel = open_data_channel.clone();
-                        let error_clone = error.clone();
-                        peer.on_data_channel(Box::new(move |channel| {
-                            let error = error_clone.clone();
-                            let channel_sender = channel_sender.clone();
+                            else {
+                                error
+                                    .write()
+                                    .await
+                                    .get_or_insert(Error::FailedToCreateDataChannel);
+                                return;
+                            };
+                            let channel = data_channel.clone();
                             let open_data_channel = open_data_channel.clone();
-                            Box::pin(async move {
-                                let (obj_to_rtc_sender, obj_to_rtc_receiver) =
-                                    mpsc::channel::<Vec<u8>>(100);
-                                let (rtc_to_obj_sender, rtc_to_obj_receiver) =
-                                    mpsc::channel::<Vec<u8>>(100);
-                                _ = channel_sender
-                                    .send(DataChannel {
-                                        error,
-                                        message_sender: obj_to_rtc_sender,
-                                        message_receiver: rtc_to_obj_receiver,
-                                    })
-                                    .await;
-                                *open_data_channel.write().await =
-                                    Some((channel.clone(), obj_to_rtc_receiver));
-                                let message_sender = rtc_to_obj_sender;
-                                channel.on_message(Box::new(move |message| {
-                                    let message_sender = message_sender.clone();
-                                    Box::pin(async move {
-                                        _ = message_sender
-                                            .send(message.data.into_iter().collect::<Vec<_>>())
-                                            .await;
-                                    })
-                                }));
-                            })
-                        }));
+                            let error_clone = error.clone();
+                            data_channel.on_open(Box::new(move || {
+                                let error = error_clone.clone();
+                                Box::pin(async move {
+                                    let (obj_to_rtc_sender, obj_to_rtc_receiver) =
+                                        mpsc::channel::<Vec<u8>>(100);
+                                    let (rtc_to_obj_sender, rtc_to_obj_receiver) =
+                                        mpsc::channel::<Vec<u8>>(100);
+                                    _ = channel_sender
+                                        .send(DataChannel {
+                                            error,
+                                            message_sender: obj_to_rtc_sender,
+                                            message_receiver: rtc_to_obj_receiver,
+                                        })
+                                        .await;
+                                    *open_data_channel.write().await =
+                                        Some((channel.clone(), obj_to_rtc_receiver));
+                                    let message_sender = rtc_to_obj_sender;
+                                    channel.on_message(Box::new(move |message| {
+                                        let message_sender = message_sender.clone();
+                                        Box::pin(async move {
+                                            _ = message_sender
+                                                .send(message.data.into_iter().collect::<Vec<_>>())
+                                                .await;
+                                        })
+                                    }));
+                                })
+                            }));
+                            let Ok(offer) = peer.create_offer(None).await else {
+                                error
+                                    .write()
+                                    .await
+                                    .get_or_insert(Error::FailedToCreateOffer);
+                                return;
+                            };
+                            if peer.set_local_description(offer.clone()).await.is_err() {
+                                error
+                                    .write()
+                                    .await
+                                    .get_or_insert(Error::FailedToSetLocalDescription);
+                                return;
+                            }
+                            _ = signal_sender.send(Signal::Offer(offer.sdp)).await;
+                        }
+                        SignalerKind::Answer => {
+                            let open_data_channel = open_data_channel.clone();
+                            let error_clone = error.clone();
+                            peer.on_data_channel(Box::new(move |channel| {
+                                let error = error_clone.clone();
+                                let channel_sender = channel_sender.clone();
+                                let open_data_channel = open_data_channel.clone();
+                                Box::pin(async move {
+                                    let (obj_to_rtc_sender, obj_to_rtc_receiver) =
+                                        mpsc::channel::<Vec<u8>>(100);
+                                    let (rtc_to_obj_sender, rtc_to_obj_receiver) =
+                                        mpsc::channel::<Vec<u8>>(100);
+                                    _ = channel_sender
+                                        .send(DataChannel {
+                                            error,
+                                            message_sender: obj_to_rtc_sender,
+                                            message_receiver: rtc_to_obj_receiver,
+                                        })
+                                        .await;
+                                    *open_data_channel.write().await =
+                                        Some((channel.clone(), obj_to_rtc_receiver));
+                                    let message_sender = rtc_to_obj_sender;
+                                    channel.on_message(Box::new(move |message| {
+                                        let message_sender = message_sender.clone();
+                                        Box::pin(async move {
+                                            _ = message_sender
+                                                .send(message.data.into_iter().collect::<Vec<_>>())
+                                                .await;
+                                        })
+                                    }));
+                                })
+                            }));
+                        }
                     }
                     {
                         let signal_sender = signal_sender.clone();
@@ -378,88 +407,27 @@ impl Signaler {
                     closures.push(onconnectionstatechange);
                 }
                 let open_data_channel = Arc::new(RwLock::new(None));
-                if offer {
-                    let mut data_channel_init = RtcDataChannelInit::new();
-                    data_channel_init.ordered(false);
-                    data_channel_init.max_retransmits(0);
-                    let data_channel =
-                        peer.create_data_channel_with_data_channel_dict("data", &data_channel_init);
-                    data_channel.set_binary_type(RtcDataChannelType::Arraybuffer);
-                    let open_data_channel = open_data_channel.clone();
-                    let wake_up = wake_up.clone();
-                    let error_clone = error.clone();
-                    let onopen = Closure::wrap(Box::new(move |event: JsValue| {
-                        let error = error_clone.clone();
-                        let channel = RtcDataChannel::from(
-                            Reflect::get(&event, &JsValue::from("target"))
-                                .expect("Expected target on onopen callback."),
-                        );
-                        let (obj_to_rtc_sender, obj_to_rtc_receiver) = mpsc::channel::<Vec<u8>>();
-                        let (rtc_to_obj_sender, rtc_to_obj_receiver) = mpsc::channel::<Vec<u8>>();
-                        if let Ok(mut open_data_channel) = open_data_channel.write() {
-                            *open_data_channel = Some((channel.clone(), obj_to_rtc_receiver));
+                match signaler_kind {
+                    SignalerKind::Offer {
+                        data_channel_configuration,
+                    } => {
+                        let mut data_channel_init = RtcDataChannelInit::new();
+                        if let DataChannelConfiguration::Unreliable {
+                            ordered,
+                            max_retransmits,
+                        } = data_channel_configuration
+                        {
+                            data_channel_init.ordered(ordered);
+                            data_channel_init.max_retransmits(max_retransmits);
                         }
-                        _ = channel_sender.send(DataChannel {
-                            error,
-                            wake_up: wake_up.clone(),
-                            message_sender: obj_to_rtc_sender,
-                            message_receiver: rtc_to_obj_receiver,
-                        });
-                        let message_sender = rtc_to_obj_sender;
-                        let onmessage = Closure::wrap(Box::new(move |event: JsValue| {
-                            let data = Reflect::get(&event, &"data".into())
-                                .expect("Expected data on onmessage callback.");
-                            let is_string = data.is_string();
-                            if is_string {
-                                if let Ok(encoder) = TextEncoder::new() {
-                                    if let Some(data_string) = data.as_string() {
-                                        _ = message_sender
-                                            .send(encoder.encode_with_input(data_string.as_str()));
-                                    }
-                                }
-                            } else {
-                                _ = message_sender.send(Uint8Array::new(&data).to_vec());
-                            }
-                        })
-                            as Box<dyn Fn(JsValue)>);
-                        channel.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-                        onmessage.forget(); // TODO: don't forget
-                    }) as Box<dyn Fn(JsValue)>);
-                    data_channel.set_onopen(Some(onopen.as_ref().unchecked_ref()));
-                    closures.push(onopen);
-                    let Ok(offer) = JsFuture::from(peer.create_offer()).await else {
-                        if let Ok(mut error) = error.write() {
-                            error.get_or_insert(Error::FailedToCreateOffer);
-                        }
-                        return;
-                    };
-                    let offer = RtcSessionDescription::from(offer);
-                    let mut offer_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
-                    offer_init.sdp(&offer.sdp());
-                    if JsFuture::from(peer.set_local_description(&offer_init))
-                        .await
-                        .is_err()
-                    {
-                        if let Ok(mut error) = error.write() {
-                            error.get_or_insert(Error::FailedToSetLocalDescription);
-                        }
-                        return;
-                    }
-                    _ = signal_sender.send(Signal::Offer(offer.sdp()));
-                } else {
-                    let open_data_channel = open_data_channel.clone();
-                    let wake_up = wake_up.clone();
-                    let error = error.clone();
-                    let ondatachannel = Closure::wrap(Box::new(move |event: JsValue| {
-                        let channel = js_sys::Reflect::get(&event, &"channel".into())
-                            .expect("Expected channel on ondatachannel callback.");
-                        let data_channel = RtcDataChannel::from(channel);
+                        let data_channel = peer
+                            .create_data_channel_with_data_channel_dict("data", &data_channel_init);
                         data_channel.set_binary_type(RtcDataChannelType::Arraybuffer);
                         let open_data_channel = open_data_channel.clone();
-                        let channel_sender = channel_sender.clone();
                         let wake_up = wake_up.clone();
-                        let error = error.clone();
+                        let error_clone = error.clone();
                         let onopen = Closure::wrap(Box::new(move |event: JsValue| {
+                            let error = error_clone.clone();
                             let channel = RtcDataChannel::from(
                                 Reflect::get(&event, &JsValue::from("target"))
                                     .expect("Expected target on onopen callback."),
@@ -472,7 +440,7 @@ impl Signaler {
                                 *open_data_channel = Some((channel.clone(), obj_to_rtc_receiver));
                             }
                             _ = channel_sender.send(DataChannel {
-                                error: error.clone(),
+                                error,
                                 wake_up: wake_up.clone(),
                                 message_sender: obj_to_rtc_sender,
                                 message_receiver: rtc_to_obj_receiver,
@@ -500,11 +468,88 @@ impl Signaler {
                         })
                             as Box<dyn Fn(JsValue)>);
                         data_channel.set_onopen(Some(onopen.as_ref().unchecked_ref()));
-                        onopen.forget(); // TODO: don't forget
-                    })
-                        as Box<dyn Fn(JsValue)>);
-                    peer.set_ondatachannel(Some(ondatachannel.as_ref().unchecked_ref()));
-                    closures.push(ondatachannel);
+                        closures.push(onopen);
+                        let Ok(offer) = JsFuture::from(peer.create_offer()).await else {
+                            if let Ok(mut error) = error.write() {
+                                error.get_or_insert(Error::FailedToCreateOffer);
+                            }
+                            return;
+                        };
+                        let offer = RtcSessionDescription::from(offer);
+                        let mut offer_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
+                        offer_init.sdp(&offer.sdp());
+                        if JsFuture::from(peer.set_local_description(&offer_init))
+                            .await
+                            .is_err()
+                        {
+                            if let Ok(mut error) = error.write() {
+                                error.get_or_insert(Error::FailedToSetLocalDescription);
+                            }
+                            return;
+                        }
+                        _ = signal_sender.send(Signal::Offer(offer.sdp()));
+                    }
+                    SignalerKind::Answer => {
+                        let open_data_channel = open_data_channel.clone();
+                        let wake_up = wake_up.clone();
+                        let error = error.clone();
+                        let ondatachannel = Closure::wrap(Box::new(move |event: JsValue| {
+                            let channel = js_sys::Reflect::get(&event, &"channel".into())
+                                .expect("Expected channel on ondatachannel callback.");
+                            let data_channel = RtcDataChannel::from(channel);
+                            data_channel.set_binary_type(RtcDataChannelType::Arraybuffer);
+                            let open_data_channel = open_data_channel.clone();
+                            let channel_sender = channel_sender.clone();
+                            let wake_up = wake_up.clone();
+                            let error = error.clone();
+                            let onopen = Closure::wrap(Box::new(move |event: JsValue| {
+                                let channel = RtcDataChannel::from(
+                                    Reflect::get(&event, &JsValue::from("target"))
+                                        .expect("Expected target on onopen callback."),
+                                );
+                                let (obj_to_rtc_sender, obj_to_rtc_receiver) =
+                                    mpsc::channel::<Vec<u8>>();
+                                let (rtc_to_obj_sender, rtc_to_obj_receiver) =
+                                    mpsc::channel::<Vec<u8>>();
+                                if let Ok(mut open_data_channel) = open_data_channel.write() {
+                                    *open_data_channel =
+                                        Some((channel.clone(), obj_to_rtc_receiver));
+                                }
+                                _ = channel_sender.send(DataChannel {
+                                    error: error.clone(),
+                                    wake_up: wake_up.clone(),
+                                    message_sender: obj_to_rtc_sender,
+                                    message_receiver: rtc_to_obj_receiver,
+                                });
+                                let message_sender = rtc_to_obj_sender;
+                                let onmessage = Closure::wrap(Box::new(move |event: JsValue| {
+                                    let data = Reflect::get(&event, &"data".into())
+                                        .expect("Expected data on onmessage callback.");
+                                    let is_string = data.is_string();
+                                    if is_string {
+                                        if let Ok(encoder) = TextEncoder::new() {
+                                            if let Some(data_string) = data.as_string() {
+                                                _ = message_sender.send(
+                                                    encoder.encode_with_input(data_string.as_str()),
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        _ = message_sender.send(Uint8Array::new(&data).to_vec());
+                                    }
+                                })
+                                    as Box<dyn Fn(JsValue)>);
+                                channel.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+                                onmessage.forget(); // TODO: don't forget
+                            })
+                                as Box<dyn Fn(JsValue)>);
+                            data_channel.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+                            onopen.forget(); // TODO: don't forget
+                        })
+                            as Box<dyn Fn(JsValue)>);
+                        peer.set_ondatachannel(Some(ondatachannel.as_ref().unchecked_ref()));
+                        closures.push(ondatachannel);
+                    }
                 }
                 {
                     let signal_sender = signal_sender.clone();
@@ -743,6 +788,7 @@ impl Signaler {
 #[cfg(target_arch = "wasm32")]
 impl Drop for Signaler {
     fn drop(&mut self) {
+        // TODO: should we wake up on a delay?
         self.wake_up();
     }
 }
@@ -818,6 +864,7 @@ impl DataChannel {
 #[cfg(target_arch = "wasm32")]
 impl Drop for DataChannel {
     fn drop(&mut self) {
+        // TODO: should we wake up on a delay?
         self.wake_up();
     }
 }
