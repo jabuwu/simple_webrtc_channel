@@ -1,4 +1,4 @@
-# simple_web_channel
+# simple_webrtc_channel
 
 An incredibly simple API for creating a WebRTC data channel.
 
