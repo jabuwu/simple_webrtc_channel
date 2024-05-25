@@ -1,3 +1,13 @@
+#[cfg(feature = "server")]
+mod server;
+#[cfg(feature = "server")]
+pub use server::*;
+
+#[cfg(feature = "client")]
+mod client;
+#[cfg(feature = "client")]
+pub use client::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SignalerKind {
     Offer {
@@ -706,14 +716,27 @@ impl Signaler {
         }
     }
 
-    pub fn signal(&mut self) -> Option<Signal> {
+    pub fn signal(&mut self) -> Result<Option<Signal>, Error> {
+        if self.signal_sender.is_none() {
+            return Ok(None);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.signal_receiver.try_recv().ok()
+            let error = tokio::task::block_in_place(|| *self.error.blocking_read());
+            if let Some(error) = error {
+                return Err(error);
+            }
+            Ok(self.signal_receiver.try_recv().ok())
         }
         #[cfg(target_arch = "wasm32")]
         {
-            self.signal_receiver.try_recv().ok()
+            let Ok(error) = self.error.read().map(|error| *error) else {
+                return Err(Error::Disconnected);
+            };
+            if let Some(error) = error {
+                return Err(error);
+            }
+            Ok(self.signal_receiver.try_recv().ok())
         }
     }
 
@@ -883,3 +906,27 @@ pub enum Error {
     FailedToAddIceCandidate,
     Disconnected,
 }
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FailedToStartRuntime => f.write_str("Failed to start runtime for WebRTC."),
+            Self::FailedToCreatePeer => f.write_str("Failed to create peer."),
+            Self::FailedToCreateDataChannel => f.write_str("Failed to create data channel."),
+            Self::FailedToCreateOffer => f.write_str("Failed to create offer."),
+            Self::FailedToCreateOfferDescription => {
+                f.write_str("Failed to create offer description.")
+            }
+            Self::FailedToCreateAnswer => f.write_str("Failed to create answer."),
+            Self::FailedToCreateAnswerDescription => {
+                f.write_str("Failed to create answer description.")
+            }
+            Self::FailedToSetLocalDescription => f.write_str("Failed to set local description."),
+            Self::FailedToSetRemoteDescription => f.write_str("Failed to set remote description."),
+            Self::FailedToAddIceCandidate => f.write_str("Failed to add ice candidate."),
+            Self::Disconnected => f.write_str("Disconnected."),
+        }
+    }
+}
+
+impl std::error::Error for Error {}

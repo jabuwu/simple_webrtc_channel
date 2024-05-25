@@ -34,7 +34,7 @@ fn update(
     my_data_channel: &mut Option<DataChannel>,
     them: &mut Signaler,
 ) {
-    while let Some(signal) = me.signal() {
+    while let Some(signal) = me.signal().unwrap() {
         them.receive(signal);
     }
     if let Some(mut data_channel) = me.data_channel().unwrap() {
