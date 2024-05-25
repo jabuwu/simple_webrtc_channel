@@ -7,6 +7,5 @@ An incredibly simple API for creating a WebRTC data channel.
 
 ## Todo
 
-- Errors and cleanup
 - Configuration types
 - Allow passing `webrtc` engine settings to peer
