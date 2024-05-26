@@ -19,7 +19,8 @@ fn main() {
             SocketAddr::from(([0, 0, 0, 0], 3001)),
             vec!["192.168.2.241".to_owned()],
             webrtc_configuration(),
-        ).unwrap();
+        )
+        .unwrap();
         let mut data_channels = vec![];
         loop {
             if let Some(data_channel) = server.accept() {

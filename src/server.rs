@@ -65,9 +65,13 @@ impl Server {
                 socket: Option<UdpSocket>,
                 mux_default: Option<Arc<webrtc::ice::udp_mux::UDPMuxDefault>>,
             }
-            let server = Server::http(http_address).map_err(|_| ServerError::FailedToListen(http_address))?;
-            let socket = UdpSocket::bind(udp_address).map_err(|_| ServerError::FailedToBind(udp_address))?;
-            socket.set_nonblocking(true).map_err(|_| ServerError::FailedToBind(udp_address))?;
+            let server = Server::http(http_address)
+                .map_err(|_| ServerError::FailedToListen(http_address))?;
+            let socket =
+                UdpSocket::bind(udp_address).map_err(|_| ServerError::FailedToBind(udp_address))?;
+            socket
+                .set_nonblocking(true)
+                .map_err(|_| ServerError::FailedToBind(udp_address))?;
             let mux_data = Arc::new(RwLock::new(MuxData {
                 socket: Some(socket),
                 mux_default: None,
@@ -94,8 +98,13 @@ impl Server {
                             {
                                 mux_default
                             } else {
-                                let udp_socket =
-                                    UdpSocket::try_from(mux_data.socket.take().expect("Expected a UdpSocket to convert into Tokio.")).expect("Failed to create Tokio UdpSocket from std UdpSocket.");
+                                let udp_socket = UdpSocket::try_from(
+                                    mux_data
+                                        .socket
+                                        .take()
+                                        .expect("Expected a UdpSocket to convert into Tokio."),
+                                )
+                                .expect("Failed to create Tokio UdpSocket from std UdpSocket.");
                                 let mux_default = UDPMuxDefault::new(UDPMuxParams::new(udp_socket));
                                 mux_data.mux_default = Some(mux_default.clone());
                                 mux_default

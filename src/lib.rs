@@ -178,7 +178,9 @@ impl Signaler {
     pub fn new(configuration: Configuration, signaler_kind: SignalerKind) -> Self {
         {
             use webrtc::api::setting_engine::SettingEngine;
-            Self::new_with_setting_engine(configuration, signaler_kind, async { SettingEngine::default() })
+            Self::new_with_setting_engine(configuration, signaler_kind, async {
+                SettingEngine::default()
+            })
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -542,7 +544,9 @@ impl Signaler {
         make_setting_engine: F,
     ) -> Self
     where
-        F: std::future::Future<Output = webrtc::api::setting_engine::SettingEngine> + Send + 'static,
+        F: std::future::Future<Output = webrtc::api::setting_engine::SettingEngine>
+            + Send
+            + 'static,
     {
         #[cfg(not(target_arch = "wasm32"))]
         {
