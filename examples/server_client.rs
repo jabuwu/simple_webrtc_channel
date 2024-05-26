@@ -1,10 +1,25 @@
 use std::{net::SocketAddr, str, time::Duration};
 
-use simple_webrtc_channel::{Client, DataChannelConfiguration, Server};
+use simple_webrtc_channel::{Client, Configuration, DataChannelConfiguration, IceServer, Server};
+
+pub fn webrtc_configuration() -> Configuration {
+    Configuration {
+        ice_servers: vec![IceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
 
 fn main() {
     std::thread::spawn(|| {
-        let mut server = Server::new(SocketAddr::from(([0, 0, 0, 0], 3000)));
+        let mut server = Server::new(
+            SocketAddr::from(([0, 0, 0, 0], 3000)),
+            SocketAddr::from(([0, 0, 0, 0], 3001)),
+            vec!["192.168.2.241".to_owned()],
+            webrtc_configuration(),
+        ).unwrap();
         let mut data_channels = vec![];
         loop {
             if let Some(data_channel) = server.accept() {
@@ -24,7 +39,11 @@ fn main() {
         }
     });
     std::thread::sleep(Duration::from_millis(200));
-    let mut client = Client::new("http://127.0.0.1:3000", DataChannelConfiguration::Reliable);
+    let mut client = Client::new(
+        "http://127.0.0.1:3000",
+        webrtc_configuration(),
+        DataChannelConfiguration::Reliable,
+    );
     let mut data_channel = loop {
         if let Some(data_channel) = client.check_connection().unwrap() {
             break data_channel;

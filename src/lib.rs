@@ -8,6 +8,129 @@ mod client;
 #[cfg(feature = "client")]
 pub use client::*;
 
+#[derive(Debug, Default, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct IceServer {
+    pub urls: Vec<String>,
+    pub username: Option<String>,
+    pub credential: Option<String>,
+    pub credential_type: IceCredentialType,
+}
+
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum IceCredentialType {
+    #[default]
+    Unspecified,
+    Password,
+    Oauth,
+}
+
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum IceTransportPolicy {
+    #[default]
+    All,
+    Relay,
+}
+
+#[derive(Debug, Default, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Configuration {
+    pub ice_servers: Vec<IceServer>,
+    pub ice_transport_policy: IceTransportPolicy,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<Configuration> for webrtc::peer_connection::configuration::RTCConfiguration {
+    fn from(value: Configuration) -> Self {
+        use webrtc::{
+            ice_transport::{ice_credential_type::RTCIceCredentialType, ice_server::RTCIceServer},
+            peer_connection::{
+                configuration::RTCConfiguration,
+                policy::ice_transport_policy::RTCIceTransportPolicy,
+            },
+        };
+        RTCConfiguration {
+            ice_servers: value
+                .ice_servers
+                .into_iter()
+                .map(|ice_server| RTCIceServer {
+                    urls: ice_server.urls,
+                    username: ice_server.username.unwrap_or(String::new()),
+                    credential: ice_server.credential.unwrap_or(String::new()),
+                    credential_type: match ice_server.credential_type {
+                        IceCredentialType::Unspecified => RTCIceCredentialType::Unspecified,
+                        IceCredentialType::Password => RTCIceCredentialType::Password,
+                        IceCredentialType::Oauth => RTCIceCredentialType::Oauth,
+                    },
+                    ..Default::default()
+                })
+                .collect(),
+            ice_transport_policy: match value.ice_transport_policy {
+                IceTransportPolicy::All => RTCIceTransportPolicy::All,
+                IceTransportPolicy::Relay => RTCIceTransportPolicy::Relay,
+            },
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<Configuration> for web_sys::RtcConfiguration {
+    fn from(value: Configuration) -> Self {
+        use js_sys::{Array, Object, Reflect};
+        use wasm_bindgen::JsValue;
+        use web_sys::{RtcConfiguration, RtcIceTransportPolicy};
+        let mut configuration = RtcConfiguration::new();
+        let ice_servers = Array::new();
+        for IceServer {
+            urls,
+            username,
+            credential,
+            credential_type: _,
+        } in value.ice_servers
+        {
+            let mut ice_server = Object::new();
+            Reflect::set(
+                &mut ice_server,
+                &JsValue::from("urls"),
+                &urls
+                    .into_iter()
+                    .fold(Array::new(), |array, url| {
+                        array.push(&JsValue::from(url));
+                        array
+                    })
+                    .into(),
+            )
+            .unwrap();
+            if let Some(username) = username {
+                Reflect::set(
+                    &mut ice_server,
+                    &JsValue::from("username"),
+                    &JsValue::from(username),
+                )
+                .unwrap();
+            }
+            if let Some(credential) = credential {
+                Reflect::set(
+                    &mut ice_server,
+                    &JsValue::from("credential"),
+                    &JsValue::from(credential),
+                )
+                .unwrap();
+            }
+            ice_servers.push(&ice_server);
+        }
+        configuration.ice_servers(&ice_servers);
+        configuration.ice_transport_policy(match value.ice_transport_policy {
+            IceTransportPolicy::All => RtcIceTransportPolicy::All,
+            IceTransportPolicy::Relay => RtcIceTransportPolicy::Relay,
+        });
+        configuration
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SignalerKind {
     Offer {
@@ -52,310 +175,14 @@ pub struct Signaler {
 }
 
 impl Signaler {
-    // TODO: config
-    pub fn new(signaler_kind: SignalerKind) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(configuration: Configuration, signaler_kind: SignalerKind) -> Self {
         {
-            use std::{sync::Arc, thread::spawn};
-            use tokio::sync::{mpsc, RwLock};
-            let (signal_sender, signal_to_thread) = mpsc::channel::<Signal>(100);
-            let (signal_from_thread, signal_receiver) = mpsc::channel::<Signal>(100);
-            let (channel_sender, channel_receiver) = mpsc::channel::<DataChannel>(100);
-            let error = Arc::new(RwLock::new(None));
-            let error_clone = error.clone();
-            spawn(move || {
-                let mut signal_receiver = signal_to_thread;
-                let signal_sender = signal_from_thread;
-                let error = error_clone;
-                let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                else {
-                    *error.blocking_write() = Some(Error::FailedToStartRuntime);
-                    return;
-                };
-                runtime.block_on(async move {
-                    use webrtc::{
-                        api::{
-                            interceptor_registry::register_default_interceptors,
-                            media_engine::MediaEngine, APIBuilder,
-                        },
-                        data_channel::data_channel_init::RTCDataChannelInit,
-                        ice_transport::{
-                            ice_candidate::RTCIceCandidateInit,
-                            ice_credential_type::RTCIceCredentialType, ice_server::RTCIceServer,
-                        },
-                        interceptor::registry::Registry,
-                        peer_connection::{
-                            configuration::RTCConfiguration,
-                            peer_connection_state::RTCPeerConnectionState,
-                            sdp::session_description::RTCSessionDescription,
-                        },
-                    };
-                    let mut media_engine = MediaEngine::default();
-                    if media_engine.register_default_codecs().is_err() {
-                        error
-                            .write()
-                            .await
-                            .get_or_insert(Error::FailedToStartRuntime);
-                        return;
-                    }
-                    let registry = Registry::new();
-                    let Ok(registry) = register_default_interceptors(registry, &mut media_engine)
-                    else {
-                        error
-                            .write()
-                            .await
-                            .get_or_insert(Error::FailedToStartRuntime);
-                        return;
-                    };
-                    let api = APIBuilder::new()
-                        .with_media_engine(media_engine)
-                        .with_interceptor_registry(registry);
-                    let api = api.build();
-                    let configuration = RTCConfiguration::from(RTCConfiguration {
-                        ice_servers: vec![RTCIceServer {
-                            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                            username: String::new(),
-                            credential: String::new(),
-                            credential_type: RTCIceCredentialType::Unspecified,
-                        }],
-                        ..Default::default()
-                    });
-                    let Ok(peer) = api.new_peer_connection(configuration).await else {
-                        error.write().await.get_or_insert(Error::FailedToCreatePeer);
-                        return;
-                    };
-                    {
-                        let error = error.clone();
-                        peer.on_peer_connection_state_change(Box::new(move |state| {
-                            let error = error.clone();
-                            Box::pin(async move {
-                                if state == RTCPeerConnectionState::Disconnected {
-                                    error.write().await.get_or_insert(Error::Disconnected);
-                                }
-                            })
-                        }));
-                    }
-                    let open_data_channel = Arc::new(RwLock::new(None));
-                    match signaler_kind {
-                        SignalerKind::Offer {
-                            data_channel_configuration,
-                        } => {
-                            let Ok(data_channel) = peer
-                                .create_data_channel(
-                                    "data",
-                                    Some(match data_channel_configuration {
-                                        DataChannelConfiguration::Reliable => RTCDataChannelInit {
-                                            ordered: Some(false),
-                                            max_retransmits: Some(0),
-                                            ..Default::default()
-                                        },
-                                        DataChannelConfiguration::Unreliable {
-                                            ordered,
-                                            max_retransmits,
-                                        } => RTCDataChannelInit {
-                                            ordered: Some(ordered),
-                                            max_retransmits: Some(max_retransmits),
-                                            ..Default::default()
-                                        },
-                                    }),
-                                )
-                                .await
-                            else {
-                                error
-                                    .write()
-                                    .await
-                                    .get_or_insert(Error::FailedToCreateDataChannel);
-                                return;
-                            };
-                            let channel = data_channel.clone();
-                            let open_data_channel = open_data_channel.clone();
-                            let error_clone = error.clone();
-                            data_channel.on_open(Box::new(move || {
-                                let error = error_clone.clone();
-                                Box::pin(async move {
-                                    let (obj_to_rtc_sender, obj_to_rtc_receiver) =
-                                        mpsc::channel::<Vec<u8>>(100);
-                                    let (rtc_to_obj_sender, rtc_to_obj_receiver) =
-                                        mpsc::channel::<Vec<u8>>(100);
-                                    _ = channel_sender
-                                        .send(DataChannel {
-                                            error,
-                                            message_sender: obj_to_rtc_sender,
-                                            message_receiver: rtc_to_obj_receiver,
-                                        })
-                                        .await;
-                                    *open_data_channel.write().await =
-                                        Some((channel.clone(), obj_to_rtc_receiver));
-                                    let message_sender = rtc_to_obj_sender;
-                                    channel.on_message(Box::new(move |message| {
-                                        let message_sender = message_sender.clone();
-                                        Box::pin(async move {
-                                            _ = message_sender
-                                                .send(message.data.into_iter().collect::<Vec<_>>())
-                                                .await;
-                                        })
-                                    }));
-                                })
-                            }));
-                            let Ok(offer) = peer.create_offer(None).await else {
-                                error
-                                    .write()
-                                    .await
-                                    .get_or_insert(Error::FailedToCreateOffer);
-                                return;
-                            };
-                            if peer.set_local_description(offer.clone()).await.is_err() {
-                                error
-                                    .write()
-                                    .await
-                                    .get_or_insert(Error::FailedToSetLocalDescription);
-                                return;
-                            }
-                            _ = signal_sender.send(Signal::Offer(offer.sdp)).await;
-                        }
-                        SignalerKind::Answer => {
-                            let open_data_channel = open_data_channel.clone();
-                            let error_clone = error.clone();
-                            peer.on_data_channel(Box::new(move |channel| {
-                                let error = error_clone.clone();
-                                let channel_sender = channel_sender.clone();
-                                let open_data_channel = open_data_channel.clone();
-                                Box::pin(async move {
-                                    let (obj_to_rtc_sender, obj_to_rtc_receiver) =
-                                        mpsc::channel::<Vec<u8>>(100);
-                                    let (rtc_to_obj_sender, rtc_to_obj_receiver) =
-                                        mpsc::channel::<Vec<u8>>(100);
-                                    _ = channel_sender
-                                        .send(DataChannel {
-                                            error,
-                                            message_sender: obj_to_rtc_sender,
-                                            message_receiver: rtc_to_obj_receiver,
-                                        })
-                                        .await;
-                                    *open_data_channel.write().await =
-                                        Some((channel.clone(), obj_to_rtc_receiver));
-                                    let message_sender = rtc_to_obj_sender;
-                                    channel.on_message(Box::new(move |message| {
-                                        let message_sender = message_sender.clone();
-                                        Box::pin(async move {
-                                            _ = message_sender
-                                                .send(message.data.into_iter().collect::<Vec<_>>())
-                                                .await;
-                                        })
-                                    }));
-                                })
-                            }));
-                        }
-                    }
-                    {
-                        let signal_sender = signal_sender.clone();
-                        peer.on_ice_candidate(Box::new(move |ice_candidate| {
-                            let signal_sender = signal_sender.clone();
-                            Box::pin(async move {
-                                if let Some(ice_candidate) = ice_candidate {
-                                    if let Ok(json) = ice_candidate.to_json() {
-                                        _ = signal_sender
-                                            .send(Signal::IceCandidate(Some(json.candidate)))
-                                            .await;
-                                    }
-                                } else {
-                                    _ = signal_sender.send(Signal::IceCandidate(None)).await;
-                                }
-                            })
-                        }));
-                    }
-                    while let Some(signal) = signal_receiver.recv().await {
-                        match signal {
-                            Signal::Offer(sdp) => {
-                                let Ok(offer) = RTCSessionDescription::offer(sdp) else {
-                                    error
-                                        .write()
-                                        .await
-                                        .get_or_insert(Error::FailedToCreateOfferDescription);
-                                    return;
-                                };
-                                if peer.set_remote_description(offer).await.is_err() {
-                                    error
-                                        .write()
-                                        .await
-                                        .get_or_insert(Error::FailedToSetRemoteDescription);
-                                    return;
-                                }
-                                let Ok(answer) = peer.create_answer(None).await else {
-                                    error
-                                        .write()
-                                        .await
-                                        .get_or_insert(Error::FailedToCreateAnswer);
-                                    return;
-                                };
-                                if peer.set_local_description(answer.clone()).await.is_err() {
-                                    error
-                                        .write()
-                                        .await
-                                        .get_or_insert(Error::FailedToSetLocalDescription);
-                                    return;
-                                }
-                                _ = signal_sender.send(Signal::Answer(answer.sdp)).await;
-                            }
-                            Signal::Answer(sdp) => {
-                                let Ok(answer) = RTCSessionDescription::answer(sdp) else {
-                                    error
-                                        .write()
-                                        .await
-                                        .get_or_insert(Error::FailedToCreateAnswerDescription);
-                                    return;
-                                };
-                                if peer.set_remote_description(answer).await.is_err() {
-                                    error
-                                        .write()
-                                        .await
-                                        .get_or_insert(Error::FailedToSetRemoteDescription);
-                                    return;
-                                }
-                            }
-                            Signal::IceCandidate(ice_candidate) => {
-                                if let Some(ice_candidate) = ice_candidate {
-                                    if peer
-                                        .add_ice_candidate(RTCIceCandidateInit {
-                                            candidate: ice_candidate,
-                                            ..Default::default()
-                                        })
-                                        .await
-                                        .is_err()
-                                    {
-                                        error
-                                            .write()
-                                            .await
-                                            .get_or_insert(Error::FailedToAddIceCandidate);
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let Some((data_channel, mut message_receiver)) =
-                        open_data_channel.write().await.take()
-                    else {
-                        return;
-                    };
-                    while let Some(message) = message_receiver.recv().await {
-                        _ = data_channel.send(&message.into()).await;
-                    }
-                    _ = peer.close();
-                });
-            });
-            Self {
-                error,
-                signal_receiver,
-                signal_sender: Some(signal_sender),
-                channel_receiver,
-            }
+            use webrtc::api::setting_engine::SettingEngine;
+            Self::new_with_setting_engine(configuration, signaler_kind, async { SettingEngine::default() })
         }
         #[cfg(target_arch = "wasm32")]
         {
-            use js_sys::{Array, Object, Promise, Reflect, Uint8Array};
+            use js_sys::{Promise, Reflect, Uint8Array};
             use std::sync::{
                 mpsc::{self, TryRecvError},
                 Arc, RwLock,
@@ -365,8 +192,8 @@ impl Signaler {
             use wasm_bindgen_futures::JsFuture;
             use web_sys::{
                 RtcConfiguration, RtcDataChannel, RtcDataChannelInit, RtcDataChannelType,
-                RtcIceCandidateInit, RtcIceTransportPolicy, RtcPeerConnection, RtcSdpType,
-                RtcSessionDescription, RtcSessionDescriptionInit, TextEncoder,
+                RtcIceCandidateInit, RtcPeerConnection, RtcSdpType, RtcSessionDescription,
+                RtcSessionDescriptionInit, TextEncoder,
             };
             let error = Arc::new(RwLock::new(None));
             let (signal_sender, signal_to_thread) = mpsc::channel::<Signal>();
@@ -381,15 +208,7 @@ impl Signaler {
                 let signal_receiver = signal_to_thread;
                 let signal_sender = signal_from_thread;
                 let wake_up = wake_up_cloned;
-                let mut configuration = RtcConfiguration::new();
-                let ice_servers = Array::new();
-                let mut ice_server = Object::new();
-                let urls = Array::new();
-                urls.push(&JsValue::from("stun:stun.l.google.com:19302"));
-                Reflect::set(&mut ice_server, &JsValue::from("urls"), &urls)
-                    .expect("Should set ice server urls.");
-                configuration.ice_servers(&ice_servers);
-                configuration.ice_transport_policy(RtcIceTransportPolicy::All);
+                let configuration = RtcConfiguration::from(configuration);
                 let Ok(peer) = RtcPeerConnection::new_with_configuration(&configuration) else {
                     if let Ok(mut error) = error.write() {
                         error.get_or_insert(Error::FailedToCreatePeer);
@@ -716,6 +535,306 @@ impl Signaler {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_with_setting_engine<F>(
+        configuration: Configuration,
+        signaler_kind: SignalerKind,
+        make_setting_engine: F,
+    ) -> Self
+    where
+        F: std::future::Future<Output = webrtc::api::setting_engine::SettingEngine> + Send + 'static,
+    {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::{sync::Arc, thread::spawn};
+            use tokio::sync::{mpsc, RwLock};
+            let (signal_sender, signal_to_thread) = mpsc::channel::<Signal>(100);
+            let (signal_from_thread, signal_receiver) = mpsc::channel::<Signal>(100);
+            let (channel_sender, channel_receiver) = mpsc::channel::<DataChannel>(100);
+            let error = Arc::new(RwLock::new(None));
+            let error_clone = error.clone();
+            spawn(move || {
+                let mut signal_receiver = signal_to_thread;
+                let signal_sender = signal_from_thread;
+                let error = error_clone;
+                let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    *error.blocking_write() = Some(Error::FailedToStartRuntime);
+                    return;
+                };
+                runtime.block_on(async move {
+                    use webrtc::{
+                        api::{
+                            interceptor_registry::register_default_interceptors,
+                            media_engine::MediaEngine, APIBuilder,
+                        },
+                        data_channel::data_channel_init::RTCDataChannelInit,
+                        ice_transport::ice_candidate::RTCIceCandidateInit,
+                        interceptor::registry::Registry,
+                        peer_connection::{
+                            configuration::RTCConfiguration,
+                            peer_connection_state::RTCPeerConnectionState,
+                            sdp::session_description::RTCSessionDescription,
+                        },
+                    };
+                    let mut media_engine = MediaEngine::default();
+                    if media_engine.register_default_codecs().is_err() {
+                        error
+                            .write()
+                            .await
+                            .get_or_insert(Error::FailedToStartRuntime);
+                        return;
+                    }
+                    let registry = Registry::new();
+                    let Ok(registry) = register_default_interceptors(registry, &mut media_engine)
+                    else {
+                        error
+                            .write()
+                            .await
+                            .get_or_insert(Error::FailedToStartRuntime);
+                        return;
+                    };
+                    let api = APIBuilder::new()
+                        .with_media_engine(media_engine)
+                        .with_interceptor_registry(registry)
+                        .with_setting_engine(make_setting_engine.await);
+                    let api = api.build();
+                    let configuration = RTCConfiguration::from(configuration);
+                    let Ok(peer) = api.new_peer_connection(configuration).await else {
+                        error.write().await.get_or_insert(Error::FailedToCreatePeer);
+                        return;
+                    };
+                    {
+                        let error = error.clone();
+                        peer.on_peer_connection_state_change(Box::new(move |state| {
+                            let error = error.clone();
+                            Box::pin(async move {
+                                if state == RTCPeerConnectionState::Disconnected {
+                                    error.write().await.get_or_insert(Error::Disconnected);
+                                }
+                            })
+                        }));
+                    }
+                    let open_data_channel = Arc::new(RwLock::new(None));
+                    match signaler_kind {
+                        SignalerKind::Offer {
+                            data_channel_configuration,
+                        } => {
+                            let Ok(data_channel) = peer
+                                .create_data_channel(
+                                    "data",
+                                    Some(match data_channel_configuration {
+                                        DataChannelConfiguration::Reliable => RTCDataChannelInit {
+                                            ordered: Some(false),
+                                            max_retransmits: Some(0),
+                                            ..Default::default()
+                                        },
+                                        DataChannelConfiguration::Unreliable {
+                                            ordered,
+                                            max_retransmits,
+                                        } => RTCDataChannelInit {
+                                            ordered: Some(ordered),
+                                            max_retransmits: Some(max_retransmits),
+                                            ..Default::default()
+                                        },
+                                    }),
+                                )
+                                .await
+                            else {
+                                error
+                                    .write()
+                                    .await
+                                    .get_or_insert(Error::FailedToCreateDataChannel);
+                                return;
+                            };
+                            let channel = data_channel.clone();
+                            let open_data_channel = open_data_channel.clone();
+                            let error_clone = error.clone();
+                            data_channel.on_open(Box::new(move || {
+                                let error = error_clone.clone();
+                                Box::pin(async move {
+                                    let (obj_to_rtc_sender, obj_to_rtc_receiver) =
+                                        mpsc::channel::<Vec<u8>>(100);
+                                    let (rtc_to_obj_sender, rtc_to_obj_receiver) =
+                                        mpsc::channel::<Vec<u8>>(100);
+                                    _ = channel_sender
+                                        .send(DataChannel {
+                                            error,
+                                            message_sender: obj_to_rtc_sender,
+                                            message_receiver: rtc_to_obj_receiver,
+                                        })
+                                        .await;
+                                    *open_data_channel.write().await =
+                                        Some((channel.clone(), obj_to_rtc_receiver));
+                                    let message_sender = rtc_to_obj_sender;
+                                    channel.on_message(Box::new(move |message| {
+                                        let message_sender = message_sender.clone();
+                                        Box::pin(async move {
+                                            _ = message_sender
+                                                .send(message.data.into_iter().collect::<Vec<_>>())
+                                                .await;
+                                        })
+                                    }));
+                                })
+                            }));
+                            let Ok(offer) = peer.create_offer(None).await else {
+                                error
+                                    .write()
+                                    .await
+                                    .get_or_insert(Error::FailedToCreateOffer);
+                                return;
+                            };
+                            if peer.set_local_description(offer.clone()).await.is_err() {
+                                error
+                                    .write()
+                                    .await
+                                    .get_or_insert(Error::FailedToSetLocalDescription);
+                                return;
+                            }
+                            _ = signal_sender.send(Signal::Offer(offer.sdp)).await;
+                        }
+                        SignalerKind::Answer => {
+                            let open_data_channel = open_data_channel.clone();
+                            let error_clone = error.clone();
+                            peer.on_data_channel(Box::new(move |channel| {
+                                let error = error_clone.clone();
+                                let channel_sender = channel_sender.clone();
+                                let open_data_channel = open_data_channel.clone();
+                                Box::pin(async move {
+                                    let (obj_to_rtc_sender, obj_to_rtc_receiver) =
+                                        mpsc::channel::<Vec<u8>>(100);
+                                    let (rtc_to_obj_sender, rtc_to_obj_receiver) =
+                                        mpsc::channel::<Vec<u8>>(100);
+                                    _ = channel_sender
+                                        .send(DataChannel {
+                                            error,
+                                            message_sender: obj_to_rtc_sender,
+                                            message_receiver: rtc_to_obj_receiver,
+                                        })
+                                        .await;
+                                    *open_data_channel.write().await =
+                                        Some((channel.clone(), obj_to_rtc_receiver));
+                                    let message_sender = rtc_to_obj_sender;
+                                    channel.on_message(Box::new(move |message| {
+                                        let message_sender = message_sender.clone();
+                                        Box::pin(async move {
+                                            _ = message_sender
+                                                .send(message.data.into_iter().collect::<Vec<_>>())
+                                                .await;
+                                        })
+                                    }));
+                                })
+                            }));
+                        }
+                    }
+                    {
+                        let signal_sender = signal_sender.clone();
+                        peer.on_ice_candidate(Box::new(move |ice_candidate| {
+                            let signal_sender = signal_sender.clone();
+                            Box::pin(async move {
+                                if let Some(ice_candidate) = ice_candidate {
+                                    if let Ok(json) = ice_candidate.to_json() {
+                                        _ = signal_sender
+                                            .send(Signal::IceCandidate(Some(json.candidate)))
+                                            .await;
+                                    }
+                                } else {
+                                    _ = signal_sender.send(Signal::IceCandidate(None)).await;
+                                }
+                            })
+                        }));
+                    }
+                    while let Some(signal) = signal_receiver.recv().await {
+                        match signal {
+                            Signal::Offer(sdp) => {
+                                let Ok(offer) = RTCSessionDescription::offer(sdp) else {
+                                    error
+                                        .write()
+                                        .await
+                                        .get_or_insert(Error::FailedToCreateOfferDescription);
+                                    return;
+                                };
+                                if peer.set_remote_description(offer).await.is_err() {
+                                    error
+                                        .write()
+                                        .await
+                                        .get_or_insert(Error::FailedToSetRemoteDescription);
+                                    return;
+                                }
+                                let Ok(answer) = peer.create_answer(None).await else {
+                                    error
+                                        .write()
+                                        .await
+                                        .get_or_insert(Error::FailedToCreateAnswer);
+                                    return;
+                                };
+                                if peer.set_local_description(answer.clone()).await.is_err() {
+                                    error
+                                        .write()
+                                        .await
+                                        .get_or_insert(Error::FailedToSetLocalDescription);
+                                    return;
+                                }
+                                _ = signal_sender.send(Signal::Answer(answer.sdp)).await;
+                            }
+                            Signal::Answer(sdp) => {
+                                let Ok(answer) = RTCSessionDescription::answer(sdp) else {
+                                    error
+                                        .write()
+                                        .await
+                                        .get_or_insert(Error::FailedToCreateAnswerDescription);
+                                    return;
+                                };
+                                if peer.set_remote_description(answer).await.is_err() {
+                                    error
+                                        .write()
+                                        .await
+                                        .get_or_insert(Error::FailedToSetRemoteDescription);
+                                    return;
+                                }
+                            }
+                            Signal::IceCandidate(ice_candidate) => {
+                                if let Some(ice_candidate) = ice_candidate {
+                                    if peer
+                                        .add_ice_candidate(RTCIceCandidateInit {
+                                            candidate: ice_candidate,
+                                            ..Default::default()
+                                        })
+                                        .await
+                                        .is_err()
+                                    {
+                                        error
+                                            .write()
+                                            .await
+                                            .get_or_insert(Error::FailedToAddIceCandidate);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let Some((data_channel, mut message_receiver)) =
+                        open_data_channel.write().await.take()
+                    else {
+                        return;
+                    };
+                    while let Some(message) = message_receiver.recv().await {
+                        _ = data_channel.send(&message.into()).await;
+                    }
+                    _ = peer.close();
+                });
+            });
+            Self {
+                error,
+                signal_receiver,
+                signal_sender: Some(signal_sender),
+                channel_receiver,
+            }
+        }
+    }
+
     pub fn signal(&mut self) -> Result<Option<Signal>, Error> {
         if self.signal_sender.is_none() {
             return Ok(None);
@@ -892,7 +1011,7 @@ impl Drop for DataChannel {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     FailedToStartRuntime,
     FailedToCreatePeer,

@@ -1,8 +1,8 @@
 use std::sync::mpsc;
 
-use crate::{DataChannel, DataChannelConfiguration, Signal, Signaler, SignalerKind};
+use crate::{Configuration, DataChannel, DataChannelConfiguration, Signal, Signaler, SignalerKind};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckConnectionError {
     BadResponse,
     WebRtcError(crate::Error),
@@ -26,12 +26,19 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(server_url: &str, data_channel_configuration: DataChannelConfiguration) -> Self {
+    pub fn new(
+        server_url: &str,
+        webrtc_configuration: Configuration,
+        data_channel_configuration: DataChannelConfiguration,
+    ) -> Self {
         Self {
             server_url: server_url.to_owned(),
-            signaler: Signaler::new(SignalerKind::Offer {
-                data_channel_configuration,
-            }),
+            signaler: Signaler::new(
+                webrtc_configuration,
+                SignalerKind::Offer {
+                    data_channel_configuration,
+                },
+            ),
             http_response_receiver: None,
         }
     }

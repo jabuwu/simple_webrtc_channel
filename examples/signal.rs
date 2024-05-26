@@ -1,14 +1,21 @@
 use std::{str, time::Duration};
 
-use simple_webrtc_channel::{DataChannel, DataChannelConfiguration, Signaler, SignalerKind};
+use simple_webrtc_channel::{Configuration, DataChannel, DataChannelConfiguration, IceServer, Signaler, SignalerKind};
 
 fn main() {
-    let mut offerer = Signaler::new(SignalerKind::Offer {
+    let webrtc_configuration = Configuration {
+        ice_servers: vec![IceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut offerer = Signaler::new(webrtc_configuration.clone(), SignalerKind::Offer {
         data_channel_configuration: DataChannelConfiguration::Reliable,
     });
     let mut offerer_data_channel = None;
 
-    let mut answerer = Signaler::new(SignalerKind::Answer);
+    let mut answerer = Signaler::new(webrtc_configuration, SignalerKind::Answer);
     let mut answerer_data_channel = None;
 
     loop {

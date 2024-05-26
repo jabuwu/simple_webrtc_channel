@@ -1,6 +1,27 @@
 use std::net::SocketAddr;
 
-use crate::DataChannel;
+use crate::{Configuration, DataChannel};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerError {
+    FailedToListen(SocketAddr),
+    FailedToBind(SocketAddr),
+}
+
+impl std::fmt::Display for ServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FailedToListen(address) => {
+                f.write_str(&format!("Failed to listen on TCP {}", address))
+            }
+            Self::FailedToBind(address) => {
+                f.write_str(&format!("Failed to listen on bind on UDP {}", address))
+            }
+        }
+    }
+}
+
+impl std::error::Error for ServerError {}
 
 struct Connection {
     #[cfg(not(target_arch = "wasm32"))]
@@ -17,16 +38,40 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(http_address: SocketAddr) -> Self {
+    pub fn new(
+        http_address: SocketAddr,
+        udp_address: SocketAddr,
+        nat_ips: Vec<String>,
+        webrtc_configuration: Configuration,
+    ) -> Result<Self, ServerError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use crate::{Signal, Signaler, SignalerKind};
             use std::{
-                sync::mpsc,
+                net::UdpSocket,
+                sync::{mpsc, Arc},
                 time::{Duration, Instant},
             };
             use tiny_http::{Header, Response, Server};
-            let server = Server::http(http_address).unwrap(); // TODO: remove unwrap
+            use tokio::sync::RwLock;
+            use webrtc::{
+                ice::{
+                    udp_mux::{UDPMuxDefault, UDPMuxParams},
+                    udp_network::UDPNetwork,
+                },
+                ice_transport::ice_candidate_type::RTCIceCandidateType,
+            };
+            struct MuxData {
+                socket: Option<UdpSocket>,
+                mux_default: Option<Arc<webrtc::ice::udp_mux::UDPMuxDefault>>,
+            }
+            let server = Server::http(http_address).map_err(|_| ServerError::FailedToListen(http_address))?;
+            let socket = UdpSocket::bind(udp_address).map_err(|_| ServerError::FailedToBind(udp_address))?;
+            socket.set_nonblocking(true).map_err(|_| ServerError::FailedToBind(udp_address))?;
+            let mux_data = Arc::new(RwLock::new(MuxData {
+                socket: Some(socket),
+                mux_default: None,
+            }));
             let (connection_sender, connection_receiver) = mpsc::channel();
             std::thread::spawn(move || {
                 for mut request in server.incoming_requests() {
@@ -35,7 +80,33 @@ impl Server {
                         _ = request.respond(Response::from_string("").with_status_code(500));
                         continue;
                     }
-                    let mut signaler = Signaler::new(SignalerKind::Answer);
+                    let mux_data = mux_data.clone();
+                    let nat_ips = nat_ips.clone();
+                    let mut signaler = Signaler::new_with_setting_engine(
+                        webrtc_configuration.clone(),
+                        SignalerKind::Answer,
+                        async move {
+                            use tokio::net::UdpSocket;
+                            use webrtc::api::setting_engine::SettingEngine;
+                            let mut mux_data = mux_data.write().await;
+                            let mux_default = if let Some(mux_default) =
+                                mux_data.mux_default.as_ref().cloned()
+                            {
+                                mux_default
+                            } else {
+                                let udp_socket =
+                                    UdpSocket::try_from(mux_data.socket.take().expect("Expected a UdpSocket to convert into Tokio.")).expect("Failed to create Tokio UdpSocket from std UdpSocket.");
+                                let mux_default = UDPMuxDefault::new(UDPMuxParams::new(udp_socket));
+                                mux_data.mux_default = Some(mux_default.clone());
+                                mux_default
+                            };
+                            let mut setting_engine = SettingEngine::default();
+                            setting_engine.set_udp_network(UDPNetwork::Muxed(mux_default));
+                            setting_engine
+                                .set_nat_1to1_ips(nat_ips.clone(), RTCIceCandidateType::Host);
+                            setting_engine
+                        },
+                    );
                     signaler.receive(Signal::Offer(offer));
                     let Ok(answer_sdp) = (loop {
                         match signaler.signal() {
@@ -95,10 +166,10 @@ impl Server {
                     });
                 }
             });
-            Self {
+            Ok(Self {
                 connection_receiver,
                 connections: vec![],
-            }
+            })
         }
         #[cfg(target_arch = "wasm32")]
         {
