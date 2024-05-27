@@ -176,6 +176,7 @@ pub struct Signaler {
 
 impl Signaler {
     pub fn new(configuration: Configuration, signaler_kind: SignalerKind) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         {
             use webrtc::api::setting_engine::SettingEngine;
             Self::new_with_setting_engine(configuration, signaler_kind, async {
