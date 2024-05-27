@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, str, time::Duration};
 
+use local_ip_address::local_ip;
 use simple_webrtc_channel::{Client, Configuration, DataChannelConfiguration, IceServer, Server};
 
 pub fn webrtc_configuration() -> Configuration {
@@ -17,7 +18,7 @@ fn main() {
         let mut server = Server::new(
             SocketAddr::from(([0, 0, 0, 0], 3000)),
             SocketAddr::from(([0, 0, 0, 0], 3001)),
-            vec!["192.168.2.241".to_owned()],
+            vec![local_ip().unwrap().to_string()],
             webrtc_configuration(),
         )
         .unwrap();
