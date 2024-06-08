@@ -17,8 +17,8 @@ fn main() {
     std::thread::spawn(|| {
         let mut server = Server::new(
             SocketAddr::from(([0, 0, 0, 0], 3000)),
-            SocketAddr::from(([0, 0, 0, 0], 3001)),
-            vec![local_ip().unwrap().to_string()],
+            Some(SocketAddr::from(([0, 0, 0, 0], 3001))),
+            Some(vec![local_ip().unwrap().to_string()]),
             webrtc_configuration(),
         )
         .unwrap();

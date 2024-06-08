@@ -40,8 +40,8 @@ pub struct Server {
 impl Server {
     pub fn new(
         http_address: SocketAddr,
-        udp_address: SocketAddr,
-        nat_ips: Vec<String>,
+        udp_address: Option<SocketAddr>,
+        nat_ips: Option<Vec<String>>,
         webrtc_configuration: Configuration,
     ) -> Result<Self, ServerError> {
         #[cfg(not(target_arch = "wasm32"))]
@@ -67,13 +67,18 @@ impl Server {
             }
             let server = Server::http(http_address)
                 .map_err(|_| ServerError::FailedToListen(http_address))?;
-            let socket =
-                UdpSocket::bind(udp_address).map_err(|_| ServerError::FailedToBind(udp_address))?;
-            socket
-                .set_nonblocking(true)
-                .map_err(|_| ServerError::FailedToBind(udp_address))?;
+            let socket = if let Some(udp_address) = udp_address {
+                let socket =
+                    UdpSocket::bind(udp_address).map_err(|_| ServerError::FailedToBind(udp_address))?;
+                socket
+                    .set_nonblocking(true)
+                    .map_err(|_| ServerError::FailedToBind(udp_address))?;
+                Some(socket)
+            } else {
+                None
+            };
             let mux_data = Arc::new(RwLock::new(MuxData {
-                socket: Some(socket),
+                socket,
                 mux_default: None,
             }));
             let (connection_sender, connection_receiver) = mpsc::channel();
@@ -96,23 +101,23 @@ impl Server {
                             let mux_default = if let Some(mux_default) =
                                 mux_data.mux_default.as_ref().cloned()
                             {
-                                mux_default
-                            } else {
-                                let udp_socket = UdpSocket::try_from(
-                                    mux_data
-                                        .socket
-                                        .take()
-                                        .expect("Expected a UdpSocket to convert into Tokio."),
-                                )
-                                .expect("Failed to create Tokio UdpSocket from std UdpSocket.");
+                                Some(mux_default)
+                            } else if let Some(udp_socket) = mux_data.socket.take() {
+                                let udp_socket = UdpSocket::try_from(udp_socket).expect("Failed to create Tokio UdpSocket from std UdpSocket.");
                                 let mux_default = UDPMuxDefault::new(UDPMuxParams::new(udp_socket));
                                 mux_data.mux_default = Some(mux_default.clone());
-                                mux_default
+                                Some(mux_default)
+                            } else {
+                                None
                             };
                             let mut setting_engine = SettingEngine::default();
-                            setting_engine.set_udp_network(UDPNetwork::Muxed(mux_default));
-                            setting_engine
-                                .set_nat_1to1_ips(nat_ips.clone(), RTCIceCandidateType::Host);
+                            if let Some(mux_default) = mux_default {
+                                setting_engine.set_udp_network(UDPNetwork::Muxed(mux_default));
+                            }
+                            if let Some(nat_ips) = nat_ips {
+                                setting_engine
+                                    .set_nat_1to1_ips(nat_ips, RTCIceCandidateType::Host);
+                            }
                             setting_engine
                         },
                     );
