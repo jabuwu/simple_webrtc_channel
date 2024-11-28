@@ -551,15 +551,13 @@ impl Signaler {
     {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use std::sync::{Arc, Once};
+            use std::sync::{Arc, LazyLock};
             use tokio::{
                 runtime::Runtime,
                 sync::{mpsc, RwLock},
             };
-            static START: Once = Once::new();
-            static mut INSTANCE: Option<Runtime> = None;
-            START.call_once(|| unsafe {
-                INSTANCE = tokio::runtime::Builder::new_multi_thread()
+            static RUNTIME: LazyLock<Option<Runtime>> = LazyLock::new(|| {
+                tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
                     .ok()
@@ -568,12 +566,12 @@ impl Signaler {
             let (signal_from_thread, signal_receiver) = mpsc::channel::<Signal>(100);
             let (channel_sender, channel_receiver) = mpsc::channel::<DataChannel>(100);
             let error = Arc::new(RwLock::new(None));
-            let Ok(runtime) = (unsafe { &INSTANCE.as_ref().ok_or(Error::FailedToStartRuntime) }) else {
+            let Some(runtime) = &*RUNTIME else {
                 tokio::task::block_in_place(|| {
-                error
-                    .blocking_write()
-                    .get_or_insert(Error::FailedToStartRuntime);
-            });
+                    error
+                        .blocking_write()
+                        .get_or_insert(Error::FailedToStartRuntime);
+                });
                 return Self {
                     error,
                     signal_receiver,
